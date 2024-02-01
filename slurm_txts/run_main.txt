@@ -1,0 +1,6 @@
+/home/u5832291/anaconda3/envs/yolact_edit/lib/python3.7/site-packages/torch/jit/_recursive.py:257: UserWarning: 'pred_layers' was found in ScriptModule constants,  but it is a non-constant submodule. Consider removing it.
+  " but it is a non-constant {}. Consider removing it.".format(name, hint))
+/home/u5832291/anaconda3/envs/yolact_edit/lib/python3.7/site-packages/torch/jit/_recursive.py:257: UserWarning: 'lat_layers' was found in ScriptModule constants,  but it is a non-constant submodule. Consider removing it.
+  " but it is a non-constant {}. Consider removing it.".format(name, hint))
+/home/u5832291/anaconda3/envs/yolact_edit/lib/python3.7/site-packages/torch/jit/_recursive.py:257: UserWarning: 'downsample_layers' was found in ScriptModule constants,  but it is a non-constant submodule. Consider removing it.
+  " but it is a non-constant {}. Consider removing it.".format(name, hint))

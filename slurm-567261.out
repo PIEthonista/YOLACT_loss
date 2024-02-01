@@ -1,0 +1,8 @@
+Box Localization Loss:      2.4831573963165283
+Class Confidence Loss:      1.661738395690918
+Mask Loss:                  2.4647910594940186
+Semantic Segmentation Loss: 0.05477369204163551
+Saved  idx:0  /work/u5832291/yixian/YOLACT/test_tun_outputs/rect_001_3_r5000.png
+Saved  idx:1  /work/u5832291/yixian/YOLACT/test_tun_outputs/rect_002_3_r5000.png
+Saved  idx:2  /work/u5832291/yixian/YOLACT/test_tun_outputs/rect_003_3_r5000.png
+Done.
