@@ -1,0 +1,10 @@
+
+===============
+Validation Phase
+
+Box Localization Loss:      2.613074779510498
+Class Confidence Loss:      1.436242938041687
+Mask Loss:                  1.8593800067901611
+Semantic Segmentation Loss: 0.07987183332443237
+ >>> Image 0 saved to: /work/u5832291/yixian/YOLACT/test_tun_outputs/rect_003_3_r5000.png
+Done.

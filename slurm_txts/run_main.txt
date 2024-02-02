@@ -1,6 +1,8 @@
-/home/u5832291/anaconda3/envs/yolact_edit/lib/python3.7/site-packages/torch/jit/_recursive.py:257: UserWarning: 'pred_layers' was found in ScriptModule constants,  but it is a non-constant submodule. Consider removing it.
-  " but it is a non-constant {}. Consider removing it.".format(name, hint))
-/home/u5832291/anaconda3/envs/yolact_edit/lib/python3.7/site-packages/torch/jit/_recursive.py:257: UserWarning: 'lat_layers' was found in ScriptModule constants,  but it is a non-constant submodule. Consider removing it.
-  " but it is a non-constant {}. Consider removing it.".format(name, hint))
-/home/u5832291/anaconda3/envs/yolact_edit/lib/python3.7/site-packages/torch/jit/_recursive.py:257: UserWarning: 'downsample_layers' was found in ScriptModule constants,  but it is a non-constant submodule. Consider removing it.
-  " but it is a non-constant {}. Consider removing it.".format(name, hint))
+/home/u5832291/anaconda3/envs/neti/lib/python3.8/site-packages/torch/jit/_recursive.py:256: UserWarning: 'pred_layers' was found in ScriptModule constants,  but it is a non-constant submodule. Consider removing it.
+  warnings.warn("'{}' was found in ScriptModule constants, "
+/home/u5832291/anaconda3/envs/neti/lib/python3.8/site-packages/torch/jit/_recursive.py:256: UserWarning: 'lat_layers' was found in ScriptModule constants,  but it is a non-constant submodule. Consider removing it.
+  warnings.warn("'{}' was found in ScriptModule constants, "
+/home/u5832291/anaconda3/envs/neti/lib/python3.8/site-packages/torch/jit/_recursive.py:256: UserWarning: 'downsample_layers' was found in ScriptModule constants,  but it is a non-constant submodule. Consider removing it.
+  warnings.warn("'{}' was found in ScriptModule constants, "
+main.py:258: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  segmap = torch.tensor(segmap)

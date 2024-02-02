@@ -7,6 +7,7 @@ import torch.backends.cudnn as cudnn
 import numpy as np
 from PIL import Image
 from collections import defaultdict
+from skimage import measure
 
 # from config import config.cfg, Config.Args, config.set_config.cfg, COLORS, Config
 import config
@@ -202,154 +203,261 @@ def validation_image_generation_wrapper(net:yolact.Yolact, args:config.Args, cfg
 
 
 
+def preprocess_img_for_yolact_loss(img, in_img_type="PIL", in_img_val_range="0-255", in_shape_order="HWC", in_channel_order="RGB"):
+    # convert img to torch tensor
+    if in_img_type == "PIL":
+        img = torch.from_numpy(np.array(img))
+    elif in_img_type == "numpy":
+        img = torch.from_numpy(img)
+    else:
+        raise NotImplementedError()
+    
+    # rearrange whatever input shape order to CHW
+    out_shape_order = "CHW"
+    shape_map = {c: idx for idx, c in enumerate(in_shape_order)}
+    shape_permutation = [shape_map[c] for c in out_shape_order]
+    img = img.permute(shape_permutation)    # CHW
+    
+    # rearrange whatever input channel ordering to RGB
+    out_channel_order = "RGB"
+    channel_map = {c: idx for idx, c in enumerate(in_channel_order)}
+    channel_permutation = [channel_map[c] for c in out_channel_order]
+    img = img[channel_permutation, :, :]    # RGB, H, W
+    
+    # MEANS & STD of ImageNet in RGB order
+    MEANS = (123.68, 116.78, 103.94)
+    STD   = (58.40, 57.12, 57.38)
+    mean = torch.Tensor(MEANS).float()[:, None, None]  # RGB,H,W / RGB,W,H
+    std  = torch.Tensor( STD ).float()[:, None, None]
+    
+    if in_img_val_range == "0-1":
+        img = img * 255
+    elif in_img_val_range == "0-255":
+        pass
+    elif in_img_val_range == "-1+1":
+        img = ((img + 1) / 2) * 255
+    else:
+        raise NotImplementedError()
+    
+    img = (img - mean) / std
+    
+    # output_format: normalised by -MEANS / STD not in [0-255],  RGB,H,W
+    return img
 
 
-def main():
 
-    # For Alex's note
-    class simulate_YOLACT_dataset(data.Dataset):
-        def __init__(self, image_path, seg_map_path):
-            # dummy
-            self.image_path = image_path
-            self.seg_map_path = seg_map_path
+def preprocess_segmap_for_yolact_loss(segmap, in_shape_order="HWC", class_label_value=3):
+    """
+    segmap : [0-1], CHW, numpy.array
+    
+    bbox/targets,    : [[tlx, tly, brx, bry, lbl-1], [..], [...]] in relative units
+    masks,    : [num_obj, h, w], [0-1], masks ordering is according to bbox ordering. Hence in our case: num_obj=1, since just one car
+    num_crowds    : int (can set to 0)   -> say batch size 8, [0,0,0,0,0,0,0,0]
+    """
+    
+    segmap = torch.tensor(segmap)
+    
+    # rearrange whatever input shape order to CHW
+    out_shape_order = "CHW"
+    shape_map = {c: idx for idx, c in enumerate(in_shape_order)}
+    shape_permutation = [shape_map[c] for c in out_shape_order]
+    segmap = segmap.permute(shape_permutation)    # CHW
+    
+    segmap = segmap[0, :, :]   # random pick one layer since all same  H,W
+
+    # bbox
+    # =================================================
+    labeled_image, num_labels = measure.label(segmap.numpy(), connectivity=2, return_num=True)
+    # find largest connected object: main car
+    largest_component_label = np.argmax(np.bincount(labeled_image.flat)[1:]) + 1
+    # new binary image with largest object only
+    largest_component_image = labeled_image == largest_component_label
+    # find coordinates: topleft, bottomright
+    coords = np.column_stack(np.where(largest_component_image))
+    top_left = np.min(coords, axis=0)
+    bottom_right = np.max(coords, axis=0)
+    # normalise coordinates according to image h,w
+    height, width = segmap.shape   # 600, 800
+    normalized_top_left = (top_left[1] / width, top_left[0] / height)    # invert for x,y
+
+    normalized_bottom_right = (bottom_right[1] / width, bottom_right[0] / height)  # invert for x,y
+    
+    #        top_left_x              top_left_y              bottom_left_x               bottom_left_y               label_idx: car (Yolact's code does label-1)
+    bbox = [[normalized_top_left[0], normalized_top_left[1], normalized_bottom_right[0], normalized_bottom_right[1], class_label_value-1]]
+    bbox = torch.Tensor(bbox)
+    #       expand 2D mask to 3D: [num_obj, H, W], where num_object=1, since we have only 1 object: main car
+    masks = np.expand_dims(segmap.numpy(), axis=0).astype(np.float32)
+    #       no crowds in our use case
+    num_crowds = 0
+    
+    return bbox, masks, num_crowds
+
+
+
+
+def yolact_training_wrapper(net, input_imgs, gt_segmaps):
+    """
+    input_imgs  -  RGB [0-1], 3CHW
+    gt_segmaps  -  RGB [0-1], 3CHW
+    """
+    
+    (yolact_net, criterion, args, cfg) = net
+    
+    yolact_net.eval()
+    yolact_net.freeze_bn()
+    for params in yolact_net.parameters():
+        params.requires_grad = False
         
-        def __len__(self):
-            # dummy
-            return 1
-        
-        def __getitem__(self, idx):
-            """
-            YOLACT dataset __getitem__() return is as below:
-                image,   : normalised by -MEANS / STD not in [0-255],  RGB,H,W
-                (
-                    bbox/targets,    : [[tlx, tly, brx, bry, lbl-1], [..], [...]] in relative units
-                    masks,    : [num_obj, h, w], [0-1], masks ordering is according to bbox ordering. Hence in our case: num_obj=1, since just one car
-                    num_crowds    : int (can set to 0)   -> say batch size 8, [0,0,0,0,0,0,0,0]
-                )
-                
-            bbox output visualisation refer to Figure_1.png
-            """
+    input_imgs = Variable(input_imgs).cuda()
+    input_imgs = input_imgs * 255
+    
+    # MEANS & STD of ImageNet in RGB order
+    MEANS = (123.68, 116.78, 103.94)
+    STD   = (58.40, 57.12, 57.38)
+    mean = torch.Tensor(MEANS).float()[None, :, None, None].cuda()  # RGB,H,W / RGB,W,H
+    std  = torch.Tensor( STD ).float()[None, :, None, None].cuda()
+    
+    input_imgs = (input_imgs - mean) / std
+    
+    bbox_list = []
+    masks_list = []
+    num_crowds_list = []
+    
+    for idx in range(gt_segmaps.shape[0]):
+        gt_segmap = gt_segmaps[idx]
+        assert len(gt_segmap.shape) == 3, "GT Segmap shape not in CHW"
+        bbox, masks, num_crowds = preprocess_segmap_for_yolact_loss(segmap=gt_segmap,
+                                                                    in_shape_order="CHW",
+                                                                    class_label_value=3  # car
+                                                                    )
+        bbox_list.append(torch.Tensor(bbox))
+        masks_list.append(torch.Tensor(masks))
+        num_crowds_list.append(num_crowds)
 
-            # image
-            # =================================================
-            from PIL import Image
-            image = Image.open(self.image_path)   # RGB [0-255], HWC
-            image = torch.from_numpy(np.array(image))   # don't do torch.transform(PIL.Image) cuz that will reduce image to value range of [0-1]
-            
-            # normalise image
-            # MEANS & STD of ImageNet in RGB order
-            MEANS = (123.68, 116.78, 103.94)
-            STD   = (58.40, 57.12, 57.38)
-            mean = torch.Tensor(MEANS).float()[None, None, :]  # RGB
-            std  = torch.Tensor( STD ).float()[None, None, :]
-            
-            image = (image - mean) / std
-            image = image.permute(2,0,1)  # HWC -> CHW
-            
-            # segmentation map
-            # =================================================
-            img_mask = Image.open(self.seg_map_path)   # RGB [0-255], HWC
-            semantic_map = np.array(img_mask)
-            
-            # Define the target pixel value: vehicle class is [0, 0, 142]
-            target_pixel = np.array([0, 0, 142])
-            binary_mask = np.all(semantic_map == target_pixel, axis=-1)
-            
-            # make the binary mask to RGB shape
-            # latent mask is 4 in depth
-            binary_mask = np.stack((binary_mask,)*3, axis=-1)
-            binary_mask = binary_mask.transpose(2,0,1)  # RGB, H, W
-            
-            # Above follow's Alex code in ViewNETI's dataset.
-            # However, YOLACT only needs one channel for one object instance.
-            yolact_binary_mask = binary_mask[0]  # random pick one layer since all same
-            
-            # bbox
-            # =================================================
-            from skimage import measure
-            labeled_image, num_labels = measure.label(yolact_binary_mask, connectivity=2, return_num=True)
-            # find largest connected object: main car
-            largest_component_label = np.argmax(np.bincount(labeled_image.flat)[1:]) + 1
-            # new binary image with largest object only
-            largest_component_image = labeled_image == largest_component_label
-            # find coordinates: topleft, bottomright
-            coords = np.column_stack(np.where(largest_component_image))
-            top_left = np.min(coords, axis=0)
-            bottom_right = np.max(coords, axis=0)
-            # normalise coordinates according to image h,w
-            height, width = yolact_binary_mask.shape   # 600, 800
-            normalized_top_left = (top_left[1] / width, top_left[0] / height)    # invert for x,y
+    bbox_tensor = Variable(torch.stack(bbox_list)).cuda()
+    masks_tensor = Variable(torch.stack(masks_list)).cuda()
+    num_crowds_tensor = Variable(torch.tensor(num_crowds_list)).cuda()
+    
+    # feed forward
+    # images, (targets, masks, num_crowds) = batch
+    preds = yolact_net(input_imgs)
+    
+    # compute loss
+    losses = criterion(yolact_net, preds, bbox_tensor, masks_tensor, num_crowds_tensor)
+    loss_dict = { k: (v).mean() for k,v in losses.items() } # Mean here because Dataparallel
+    
+    return loss_dict
 
-            normalized_bottom_right = (bottom_right[1] / width, bottom_right[0] / height)  # invert for x,y
-            
-            """
-            YOLACT dataset __getitem__() return is as below:
-                image,   : normalised by -MEANS / STD not in [0-255],  RGB,H,W
-                (
-                    bbox/targets,    : [[tlx, tly, brx, bry, lbl-1], [..], [...]] in relative units
-                    masks,    : [num_obj, h, w], [0-1], masks ordering is according to bbox ordering. Hence in our case: num_obj=1, since just one car
-                    num_crowds    : int (can set to 0)   -> say batch size 8, [0,0,0,0,0,0,0,0]
-                )
-                
-            bbox output visualisation refer to Figure_1.png
-            """
-            
-            # COCO class label mappings (vehicle related)
-            """
-            'person',     1: 1
-            'bicycle',    2: 2
-            'car',        3: 3
-            'motorcycle', 4: 4
-            'airplane',   5: 5
-            'bus',        6: 6
-            'train',      7: 7
-            'truck',      8: 8
-            'boat'        9: 9
+
+
+
+
+
+def yolact_validation_wrapper(net, cam_idxs, input_imgs, gt_imgs, gt_segmaps):
+    
+    """
+    input_img  -  RGB [0-255], BHWC, numpy.array
+    gt_imgs    -  RGB [0-255], HWC,  PIL.Image
+    gt_segmaps -      [0-1],   BCHW, numpy.array
+    """
+    
+    (yolact_net, criterion, args, cfg) = net
+    
+    yolact_net.eval()
+    yolact_net.freeze_bn()
+    for params in yolact_net.parameters():
+        params.requires_grad = False
+    
+    # here, instead of doing inference twice: on input_imgs & gt_imgs, since we have the gt_segmap,
+    # we will just inference once on the input_imgs & then later calclate loss between the predicted
+    # items and the (bbox, mask, num_crowds) generated from the gt_segmap
+    
+    lookup_cam_idx_to_det_image = {}
+    
+    input_imgs_list = []
+    bbox_list = []
+    masks_list = []
+    num_crowds_list = []
+    
+    for idx in cam_idxs:
+        # preprocess input image
+        input_img = input_imgs[idx]
+        assert len(input_img.shape) == 4, "Input Image shape not in BHWC"
+        processed_img = preprocess_img_for_yolact_loss(img=input_img.squeeze(),
+                                                       in_img_type="numpy",
+                                                       in_img_val_range="0-255",
+                                                       in_shape_order="HWC",
+                                                       in_channel_order="RGB")
+        input_imgs_list.append(processed_img)
         
-            refer Yolact/data/config.py, line 46
-            """
+        # preprocess input segmaps
+        gt_segmap = gt_segmaps[idx]
+        assert len(gt_segmap.shape) == 4, "GT Segmap shape not in BCHW"
+        bbox, masks, num_crowds = preprocess_segmap_for_yolact_loss(segmap=gt_segmap.squeeze(),
+                                                                    in_shape_order="CHW",
+                                                                    class_label_value=3  # car
+                                                                    )
+        bbox_list.append(torch.Tensor(bbox))
+        masks_list.append(torch.Tensor(masks))
+        num_crowds_list.append(num_crowds)
+    
+    input_imgs_tensor = torch.stack(input_imgs_list)
+    bbox_tensor = torch.stack(bbox_list)
+    masks_tensor = torch.stack(masks_list)
+    num_crowds_tensor = torch.tensor(num_crowds_list)
+    
+    # feed forward
+    # images, (targets, masks, num_crowds) = batch
+    preds = yolact_net(input_imgs_tensor.cuda())
+    
+    # compute loss
+    losses = criterion(yolact_net, preds, bbox_tensor.cuda(), masks_tensor.cuda(), num_crowds_tensor.cuda())
+    loss_dict = { k: (v).mean() for k,v in losses.items() } # Mean here because Dataparallel
+    
+    # inference images
+    if args.config is not None:
+        config.set_cfg(args.config)
+
+    if args.detect:
+        cfg.eval_mask_branch = False
+
+    with torch.no_grad():
+        if args.cuda:
+            cudnn.fastest = True
+            torch.set_default_tensor_type('torch.cuda.FloatTensor')
+        else:
+            torch.set_default_tensor_type('torch.FloatTensor')
+
+        yolact_net.detect.use_fast_nms = args.fast_nms
+        yolact_net.detect.use_cross_class_nms = args.cross_class_nms
+        cfg.mask_proto_debug = args.mask_proto_debug
             
-            #        top_left_x              top_left_y              bottom_left_x               bottom_left_y               label_idx: car (Yolact's code does label-1)
-            bbox = [[normalized_top_left[0], normalized_top_left[1], normalized_bottom_right[0], normalized_bottom_right[1], 3-1]]
-            bbox = torch.Tensor(bbox)
-            #       expand 2D mask to 3D: [num_obj, H, W], where num_object=1, since we have only 1 object: main car
-            masks = np.expand_dims(yolact_binary_mask, axis=0).astype(np.float32)
-            #       no crowds in our use case
-            num_crowds = 0
+        for idx in cam_idxs:
+            current_img = input_imgs[idx]  # RGB [0-255], 1HWC
             
-            return image, (bbox, masks, num_crowds)
-    
-    
-    # change all these only ~!to_change
-    # other configs are in config.py, you will wanna look at a variable called "yolact_base_config"
-    image_path = "/work/u5832291/view_neti_RT/data/DistentangledCarlaScenes/images/blackcar_day_both/rect_001_3_r5000.png"
-    seg_map_path = "/work/u5832291/view_neti_RT/data/DistentangledCarlaScenes/masks/blackcar_day_both/rect_001_3_r5000.png"
-    model_weights = "/work/u5832291/yixian/YOLACT_edit/weights/yolact_base_54_800000.pth"
-    model_config = "yolact_base_config"
-    
-    
-    # no_detection_result_default_value = 10
-    # selected_classes = ('bicycle', 'bus', 'car','motorbike', 'person', 'train')    # set in config.py, line 61
-    # config.cfg.input_size = (416, 416)
-    # config.cfg.test_input_size = (416, 416)
-    
-    
-    ########## TRAINING LOSS for Diffusion model
-    yolact_dataset = simulate_YOLACT_dataset(image_path=image_path, seg_map_path=seg_map_path)
-    yolact_dataloader = data.DataLoader(yolact_dataset, 
-                                        batch_size=1,
-                                        num_workers=1,
-                                        shuffle=False,
-                                        pin_memory=True)
-                                        # generator=torch.Generator(device='cuda'))
-    
-    # from config import config.cfg, Config.Args, config.set_config
+            # permute channels from RGB to BGR for code matching
+            current_img_bgr = current_img[..., ::-1]
+            
+            # .copy() to prevent numpy tensor memory negative stride problem
+            frame = torch.from_numpy(current_img_bgr.squeeze(0).copy()).cuda().float()     # BGR, [H,W,C], [0-255]
+            batch = augmentations.FastBaseTransform()(frame.unsqueeze(0))      # BGR, [H,W,C] -> # BGR, [0,H,W,C] -> # RGB [B,C,H,W]
+            preds = yolact_net(batch, output_image=True)
+
+            img_numpy = prep_display(preds, frame, None, None, undo_transform=False)   # RGB
+            
+            lookup_cam_idx_to_det_image[idx] = Image.fromarray(img_numpy)     # Image.fromarray expects to be in HWC, which is already in
+            
+    return loss_dict, lookup_cam_idx_to_det_image
+
+
+
+def init_yolact(model_weights_path, model_config="yolact_base_config"):
     import config
-        
+    
     global args
     args = config.Args()
     
-    args.trained_model = model_weights  # need to update this as well, for validation's inferencing to work
+    args.trained_model = model_weights_path  # need to update this as well, for validation's inferencing to work
     args.config = model_config  # this as well
     config.args = args  # this too
     
@@ -371,89 +479,156 @@ def main():
     if args.cuda:
         net = net.cuda()
         criterion = criterion.cuda()
-            
-            
-    # feed to model
-    for batch in yolact_dataloader:
-        
-        # optimizer.zero_grad() here
-        
-        # feed forward
-        images, (targets, masks, num_crowds) = batch
-        preds = net(images.cuda())
-        
-        # compute loss
-        losses = criterion(net, preds, targets.cuda(), masks.cuda(), num_crowds.cuda())
-        
-        losses = { k: (v).mean() for k,v in losses.items() } # Mean here because Dataparallel
-        loss = sum([losses[k] for k in losses])
-        
-        # loss.backward() here
-        # optimizer.step() here
-        
-        """
-        Loss Key, losses[key]:
-         - B: Box Localization Loss
-         - C: Class Confidence Loss
-         - M: Mask Loss
-         - P: Prototype Loss
-         - D: Coefficient Diversity Loss
-         - E: Class Existence Loss
-         - S: Semantic Segmentation Loss
-        """
-        
-        print(f"Box Localization Loss:      {losses['B']}")
-        print(f"Class Confidence Loss:      {losses['C']}")
-        print(f"Mask Loss:                  {losses['M']}")
-        print(f"Semantic Segmentation Loss: {losses['S']}")
-        
-        # print(f"Prototype Loss:             {losses['P']}")    # not used, no such key available
-        # print(f"Coefficient Diversity Loss: {losses['D']}")    # not used, no such key available
-        # print(f"Class Existence Loss:       {losses['E']}")    # not used, no such key available
+    
+    return (net, criterion, args, config.cfg)
+
+
+
+
+
+
+
+
+
+def main():
+    ## NOTE for Alex (usage):
+    """
+    1. yolact_model = init_yolact(...)
+    2. loss_dict             = yolact_training_wrapper(yolact_model, ...)
+    3. loss_dict, PIL_Images = yolact_validation_wrapper(yolact_model, ...)
+    """
     
     
+    ########## TRAINING LOSS for Diffusion model
+    ####################################################################################################
+    ####################################################################################################
     
-    ########## validation
-    # NOTE: loss calculation part is exactly same as during training, just that for validation, there will be another 
-    #       function to perform inference on the validation images so that we can save and view them
+    yolact_model = init_yolact(model_weights_path="/work/u5832291/yixian/YOLACT_edit/weights/yolact_base_54_800000.pth",
+                               model_config="yolact_base_config")
     
-    # loss calculation part: same as above training loss
-    
-    # inference
-    
-    # ~!to_change
-    img_folder = "/work/u5832291/view_neti_RT/data/DistentangledCarlaScenes/images/blackcar_day_both"
+    input_size = (416, 416)
+
+    img_folder = "/work/u5832291/view_neti_RT/data/DistentangledCarlaScenes/images/blackcar_day_both/"
+    segmap_folder = "/work/u5832291/view_neti_RT/data/DistentangledCarlaScenes/masks/blackcar_day_both/"
 
     file_names = os.listdir(img_folder)
     file_names = sorted(file_names)
-    lookup_camidx_to_gt_image = {}
-    lookup_camidx_to_img_pred = {}
-    cam_idxs=[0, 1, 2]
-    # cam_idxs=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    print(file_names)
     
-    
-    #### yixian added (for file saving) ~!to_change
-    output_imgs_folder = "/work/u5832291/yixian/YOLACT/test_tun_outputs"
-    output_imgs_filenames = {index: file_name for index, file_name in zip(cam_idxs, file_names)}
+    image0 = Image.open(img_folder + file_names[0]).convert("RGB")    # RGB [0-255], HWC
+    image1 = Image.open(img_folder + file_names[1]).convert("RGB")
+    image2 = Image.open(img_folder + file_names[2]).convert("RGB")
+    segmap0 = Image.open(segmap_folder + file_names[0]).convert("RGB")
+    segmap1 = Image.open(segmap_folder + file_names[1]).convert("RGB")
+    segmap2 = Image.open(segmap_folder + file_names[2]).convert("RGB")
 
+    image0 = image0.resize((input_size[0], input_size[1]))
+    image1 = image1.resize((input_size[0], input_size[1]))
+    image2 = image2.resize((input_size[0], input_size[1]))
+    segmap0 = segmap0.resize((input_size[0], input_size[1]))
+    segmap1 = segmap1.resize((input_size[0], input_size[1]))
+    segmap2 = segmap2.resize((input_size[0], input_size[1]))
+
+    im_data0 = torch.from_numpy(np.array(image0)).float() / 255       # RGB [0-1], HWC
+    im_data1 = torch.from_numpy(np.array(image1)).float() / 255
+    im_data2 = torch.from_numpy(np.array(image2)).float() / 255
+    target_pixel = np.array([0, 0, 142])
+    segmap0 = torch.from_numpy(np.stack((np.all(np.array(segmap0) == target_pixel, axis=-1),)*3, axis=-1))
+    segmap1 = torch.from_numpy(np.stack((np.all(np.array(segmap1) == target_pixel, axis=-1),)*3, axis=-1))
+    segmap2 = torch.from_numpy(np.stack((np.all(np.array(segmap2) == target_pixel, axis=-1),)*3, axis=-1))
+
+    #print('---im_data0.shape={}'.format(im_data0.shape))
+    im_data0 = im_data0.permute(2, 0, 1).unsqueeze(0)                 # RGB [0-1], 1CHW
+    im_data1 = im_data1.permute(2, 0, 1).unsqueeze(0)
+    im_data2 = im_data2.permute(2, 0, 1).unsqueeze(0)
+    segmap0 = segmap0.permute(2, 0, 1).unsqueeze(0)
+    segmap1 = segmap1.permute(2, 0, 1).unsqueeze(0)
+    segmap2 = segmap2.permute(2, 0, 1).unsqueeze(0)
+
+    concatenated_im_data = torch.cat([im_data0, im_data1, im_data2], dim=0)      # RGB [0-1], 3CHW
+    concatenated_gt_segmap_data = torch.cat([segmap0, segmap1, segmap2], dim=0)  # RGB [0-1], 3CHW
+    
+    # concatenated_gt_segmap_data should be the same as batch["binary_image_mask"] in coach.py
+    
+    loss_dict = yolact_training_wrapper(net=yolact_model,
+                                        input_imgs=concatenated_im_data,
+                                        gt_segmaps=concatenated_gt_segmap_data)
+    
+    print("===============\nTraining Phase\n")
+    print(f"Box Localization Loss:      {loss_dict['B']}")    # Box Localization Loss
+    print(f"Class Confidence Loss:      {loss_dict['C']}")    # Class Confidence Loss
+    print(f"Mask Loss:                  {loss_dict['M']}")    # Mask Loss
+    print(f"Semantic Segmentation Loss: {loss_dict['S']}")    # Semantic Segmentation Loss
+
+
+
+
+
+
+
+    ########## validation
+    ####################################################################################################
+    ####################################################################################################
+    
+    
+    # ~!to_change
+    img_folder = "/work/u5832291/view_neti_RT/data/DistentangledCarlaScenes/images/blackcar_day_both/"
+    segmap_folder = "/work/u5832291/view_neti_RT/data/DistentangledCarlaScenes/masks/blackcar_day_both/"
+
+    file_names = os.listdir(img_folder)
+    file_names = sorted(file_names)
+    lookup_camidx_to_gt_image = {}     # GT image
+    lookup_camidx_to_gt_segmap = {}    # GT Segmap & bbox
+    lookup_camidx_to_img_pred = {}     # ViewNETI predicted images
+    cam_idxs=[0, 1, 2]
+    
 
     for cam_idx, file_name in zip(cam_idxs, file_names):
         img_name = os.path.join(img_folder, file_name)
-        image = Image.open(img_name).convert("RGB")   # RGB [0-255], HWC
-        lookup_camidx_to_gt_image[cam_idx] = image
-
+        segmap_name = os.path.join(segmap_folder, file_name)
+        image = Image.open(img_name).convert("RGB")                 # RGB [0-255], HWC
+        segmap = np.array(Image.open(segmap_name).convert("RGB"))   # RGB [0-255], HWC
+        
+        # Define the target pixel value: vehicle class is [0, 0, 142]
+        target_pixel = np.array([0, 0, 142])
+        binary_mask = np.all(segmap == target_pixel, axis=-1)
+        
+        # make the binary mask to RGB shape
+        # latent mask is 4 in depth
+        binary_mask = np.stack((binary_mask,)*3, axis=-1)
+        binary_mask = binary_mask.transpose(2,0,1)  # RGB, H, W
+        
         image_np = np.array(image)
-        lookup_camidx_to_img_pred[cam_idx] = np.expand_dims(image_np, axis=0)   # RGB [0-255], BHWC
+        
+        lookup_camidx_to_gt_image[cam_idx] = image                              # RGB [0-255], HWC,  PIL.Image
+        lookup_camidx_to_img_pred[cam_idx] = np.expand_dims(image_np, axis=0)   # RGB [0-255], BHWC, numpy.array
+        lookup_camidx_to_gt_segmap[cam_idx] = np.expand_dims(binary_mask, axis=0)   # [0-1], BCHW, numpy.array
 
-    # print(f"--lookup_camidx_to_gt_image={lookup_camidx_to_gt_image}")
-    # print(f"--lookup_camidx_to_img_pred={lookup_camidx_to_img_pred}")
+
+    # validation function call - loss calculation and PIL.Image dict return
+    loss_dict, lookup_cam_idx_to_det_image = yolact_validation_wrapper(net=yolact_model, 
+                                                                       cam_idxs=cam_idxs, 
+                                                                       input_imgs=lookup_camidx_to_img_pred, 
+                                                                       gt_imgs=lookup_camidx_to_gt_image, 
+                                                                       gt_segmaps=lookup_camidx_to_gt_segmap)
+    print("===============\nValidation Phase\n")
+    print(f"Box Localization Loss:      {loss_dict['B']}")    # Box Localization Loss
+    print(f"Class Confidence Loss:      {loss_dict['C']}")    # Class Confidence Loss
+    print(f"Mask Loss:                  {loss_dict['M']}")    # Mask Loss
+    print(f"Semantic Segmentation Loss: {loss_dict['S']}")    # Semantic Segmentation Loss
     
-    validation_image_generation_wrapper(net=net, 
-                                        args=args, 
-                                        cfg=config.cfg, 
-                                        input_imgs=lookup_camidx_to_img_pred, 
-                                        output_imgs_folder=output_imgs_folder, 
-                                        output_imgs_filenames=output_imgs_filenames)
+    
+    # Test saving the PIL Images
+    output_directory = "/work/u5832291/yixian/YOLACT/test_tun_outputs"
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+
+    for idx in list(lookup_cam_idx_to_det_image.keys()):
+        file_path = os.path.join(output_directory, file_names[idx])
+        img = lookup_cam_idx_to_det_image[idx]
+        img.save(file_path, format="PNG")
+        print(f" >>> Image {idx} saved to: {file_path}")
+        
     print("Done.")
         
 

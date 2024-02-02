@@ -1,0 +1,19 @@
+['rect_001_3_r5000.png', 'rect_002_3_r5000.png', 'rect_003_3_r5000.png', 'rect_004_3_r5000.png', 'rect_005_3_r5000.png', 'rect_006_3_r5000.png', 'rect_007_3_r5000.png', 'rect_008_3_r5000.png', 'rect_009_3_r5000.png', 'rect_010_3_r5000.png', 'rect_011_3_r5000.png', 'rect_012_3_r5000.png', 'rect_013_3_r5000.png', 'rect_014_3_r5000.png', 'rect_015_3_r5000.png']
+===============
+Training Phase
+
+Box Localization Loss:      1.8816848993301392
+Class Confidence Loss:      7.398316860198975
+Mask Loss:                  2.8020191192626953
+Semantic Segmentation Loss: 0.07528995722532272
+===============
+Validation Phase
+
+Box Localization Loss:      1.9940391778945923
+Class Confidence Loss:      2.615602970123291
+Mask Loss:                  1.9365671873092651
+Semantic Segmentation Loss: 0.08508603274822235
+ >>> Image 0 saved to: /work/u5832291/yixian/YOLACT/test_tun_outputs/rect_001_3_r5000.png
+ >>> Image 1 saved to: /work/u5832291/yixian/YOLACT/test_tun_outputs/rect_002_3_r5000.png
+ >>> Image 2 saved to: /work/u5832291/yixian/YOLACT/test_tun_outputs/rect_003_3_r5000.png
+Done.
