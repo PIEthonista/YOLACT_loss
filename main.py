@@ -10,16 +10,16 @@ from collections import defaultdict
 from skimage import measure
 
 # from config import config.cfg, Config.Args, config.set_config.cfg, COLORS, Config
-import config
+from . import config
 # from yolact import Yolact
-import yolact
+from . import yolact
 # from multiboxloss.multiboxloss import Multiboxloss.MultiBoxLoss
-import multiboxloss
+from . import multiboxloss
 # from augmentations import Augmentations.FastBaseTransform
-import augmentations
+from . import augmentations
 # from utils import utils.undo_image_transformation, utils.postprocess
-import utils
-import timer
+from . import utils
+from . import timer
 
 
 
@@ -159,47 +159,47 @@ def prep_display(dets_out, img, h, w, undo_transform=True, class_color=False, ma
 
 
 
-def validation_image_generation_wrapper(net:yolact.Yolact, args:config.Args, cfg:config, input_imgs:dict, output_imgs_folder:str, output_imgs_filenames:dict):
-    if args.config is not None:
-        config.set_cfg(args.config)
+# def validation_image_generation_wrapper(net:yolact.Yolact, args:config.Args, cfg:config, input_imgs:dict, output_imgs_folder:str, output_imgs_filenames:dict):
+#     if args.config is not None:
+#         config.set_cfg(args.config)
 
-    if args.detect:
-        cfg.eval_mask_branch = False
+#     if args.detect:
+#         cfg.eval_mask_branch = False
 
-    with torch.no_grad():
-        if not os.path.exists('results'):
-            os.makedirs('results')
+#     with torch.no_grad():
+#         if not os.path.exists('results'):
+#             os.makedirs('results')
 
-        if args.cuda:
-            cudnn.fastest = True
-            torch.set_default_tensor_type('torch.cuda.FloatTensor')
-        else:
-            torch.set_default_tensor_type('torch.FloatTensor')
+#         if args.cuda:
+#             cudnn.fastest = True
+#             torch.set_default_tensor_type('torch.cuda.FloatTensor')
+#         else:
+#             torch.set_default_tensor_type('torch.FloatTensor')
 
-        net.detect.use_fast_nms = args.fast_nms
-        net.detect.use_cross_class_nms = args.cross_class_nms
-        cfg.mask_proto_debug = args.mask_proto_debug
+#         net.detect.use_fast_nms = args.fast_nms
+#         net.detect.use_cross_class_nms = args.cross_class_nms
+#         cfg.mask_proto_debug = args.mask_proto_debug
 
-        if not os.path.exists(output_imgs_folder):
-            os.makedirs(output_imgs_folder)
+#         if not os.path.exists(output_imgs_folder):
+#             os.makedirs(output_imgs_folder)
             
-        for idx in list(input_imgs.keys()):
-            current_img = input_imgs[idx]  # RGB [0-255], 1HWC
+#         for idx in list(input_imgs.keys()):
+#             current_img = input_imgs[idx]  # RGB [0-255], 1HWC
             
-            # permute channels from RGB to BGR for code matching
-            current_img_bgr = current_img[..., ::-1]
-            # .copy() to prevent numpy tensor memory negative stride problem
-            frame = torch.from_numpy(current_img_bgr.squeeze(0).copy()).cuda().float()     # BGR, [H,W,C], [0-255]
-            batch = augmentations.FastBaseTransform()(frame.unsqueeze(0))      # BGR, [H,W,C] -> # BGR, [0,H,W,C] -> # RGB [B,C,H,W]
-            preds = net(batch, output_image=True)
+#             # permute channels from RGB to BGR for code matching
+#             current_img_bgr = current_img[..., ::-1]
+#             # .copy() to prevent numpy tensor memory negative stride problem
+#             frame = torch.from_numpy(current_img_bgr.squeeze(0).copy()).cuda().float()     # BGR, [H,W,C], [0-255]
+#             batch = augmentations.FastBaseTransform()(frame.unsqueeze(0))      # BGR, [H,W,C] -> # BGR, [0,H,W,C] -> # RGB [B,C,H,W]
+#             preds = net(batch, output_image=True)
 
-            img_numpy = prep_display(preds, frame, None, None, undo_transform=False)   # RGB
+#             img_numpy = prep_display(preds, frame, None, None, undo_transform=False)   # RGB
             
-            if len(output_imgs_filenames) == 0:
-                img_numpy = img_numpy[:, :, (2, 1, 0)]  # BGR
+#             if len(output_imgs_filenames) == 0:
+#                 img_numpy = img_numpy[:, :, (2, 1, 0)]  # BGR
                 
-            cv2.imwrite(os.path.join(output_imgs_folder, output_imgs_filenames[idx]), img_numpy)
-            print(f"Saved  idx:{idx}  {os.path.join(output_imgs_folder, output_imgs_filenames[idx])}")
+#             cv2.imwrite(os.path.join(output_imgs_folder, output_imgs_filenames[idx]), img_numpy)
+#             print(f"Saved  idx:{idx}  {os.path.join(output_imgs_folder, output_imgs_filenames[idx])}")
 
 
 
@@ -267,7 +267,7 @@ def preprocess_segmap_for_yolact_loss(segmap, in_shape_order="HWC", class_label_
 
     # bbox
     # =================================================
-    labeled_image, num_labels = measure.label(segmap.numpy(), connectivity=2, return_num=True)
+    labeled_image, num_labels = measure.label(segmap.cpu().numpy(), connectivity=2, return_num=True)
     # find largest connected object: main car
     largest_component_label = np.argmax(np.bincount(labeled_image.flat)[1:]) + 1
     # new binary image with largest object only
@@ -286,7 +286,7 @@ def preprocess_segmap_for_yolact_loss(segmap, in_shape_order="HWC", class_label_
     bbox = [[normalized_top_left[0], normalized_top_left[1], normalized_bottom_right[0], normalized_bottom_right[1], class_label_value-1]]
     bbox = torch.Tensor(bbox)
     #       expand 2D mask to 3D: [num_obj, H, W], where num_object=1, since we have only 1 object: main car
-    masks = np.expand_dims(segmap.numpy(), axis=0).astype(np.float32)
+    masks = np.expand_dims(segmap.cpu().numpy(), axis=0).astype(np.float32)
     #       no crowds in our use case
     num_crowds = 0
     
@@ -308,14 +308,14 @@ def yolact_training_wrapper(net, input_imgs, gt_segmaps):
     for params in yolact_net.parameters():
         params.requires_grad = False
         
-    input_imgs = Variable(input_imgs).cuda()
+    input_imgs = Variable(input_imgs).to(yolact_net.parameters().__next__().device)
     input_imgs = input_imgs * 255
     
     # MEANS & STD of ImageNet in RGB order
     MEANS = (123.68, 116.78, 103.94)
     STD   = (58.40, 57.12, 57.38)
-    mean = torch.Tensor(MEANS).float()[None, :, None, None].cuda()  # RGB,H,W / RGB,W,H
-    std  = torch.Tensor( STD ).float()[None, :, None, None].cuda()
+    mean = torch.Tensor(MEANS).float()[None, :, None, None].to(yolact_net.parameters().__next__().device)  # RGB,H,W / RGB,W,H
+    std  = torch.Tensor( STD ).float()[None, :, None, None].to(yolact_net.parameters().__next__().device)
     
     input_imgs = (input_imgs - mean) / std
     
@@ -334,9 +334,10 @@ def yolact_training_wrapper(net, input_imgs, gt_segmaps):
         masks_list.append(torch.Tensor(masks))
         num_crowds_list.append(num_crowds)
 
-    bbox_tensor = Variable(torch.stack(bbox_list)).cuda()
-    masks_tensor = Variable(torch.stack(masks_list)).cuda()
-    num_crowds_tensor = Variable(torch.tensor(num_crowds_list)).cuda()
+    
+    bbox_tensor = Variable(torch.stack(bbox_list)).to(yolact_net.parameters().__next__().device)
+    masks_tensor = Variable(torch.stack(masks_list)).to(yolact_net.parameters().__next__().device)
+    num_crowds_tensor = Variable(torch.tensor(num_crowds_list)).to(yolact_net.parameters().__next__().device)
     
     # feed forward
     # images, (targets, masks, num_crowds) = batch
@@ -401,17 +402,17 @@ def yolact_validation_wrapper(net, cam_idxs, input_imgs, gt_imgs, gt_segmaps):
         masks_list.append(torch.Tensor(masks))
         num_crowds_list.append(num_crowds)
     
-    input_imgs_tensor = torch.stack(input_imgs_list)
-    bbox_tensor = torch.stack(bbox_list)
-    masks_tensor = torch.stack(masks_list)
-    num_crowds_tensor = torch.tensor(num_crowds_list)
+    input_imgs_tensor = torch.stack(input_imgs_list).to(yolact_net.parameters().__next__().device)
+    bbox_tensor = torch.stack(bbox_list).to(yolact_net.parameters().__next__().device)
+    masks_tensor = torch.stack(masks_list).to(yolact_net.parameters().__next__().device)
+    num_crowds_tensor = torch.tensor(num_crowds_list).to(yolact_net.parameters().__next__().device)
     
     # feed forward
     # images, (targets, masks, num_crowds) = batch
-    preds = yolact_net(input_imgs_tensor.cuda())
+    preds = yolact_net(input_imgs_tensor)
     
     # compute loss
-    losses = criterion(yolact_net, preds, bbox_tensor.cuda(), masks_tensor.cuda(), num_crowds_tensor.cuda())
+    losses = criterion(yolact_net, preds, bbox_tensor, masks_tensor, num_crowds_tensor)
     loss_dict = { k: (v).mean() for k,v in losses.items() } # Mean here because Dataparallel
     
     # inference images
@@ -439,7 +440,7 @@ def yolact_validation_wrapper(net, cam_idxs, input_imgs, gt_imgs, gt_segmaps):
             current_img_bgr = current_img[..., ::-1]
             
             # .copy() to prevent numpy tensor memory negative stride problem
-            frame = torch.from_numpy(current_img_bgr.squeeze(0).copy()).cuda().float()     # BGR, [H,W,C], [0-255]
+            frame = torch.from_numpy(current_img_bgr.squeeze(0).copy()).to(yolact_net.parameters().__next__().device).float()     # BGR, [H,W,C], [0-255]
             batch = augmentations.FastBaseTransform()(frame.unsqueeze(0))      # BGR, [H,W,C] -> # BGR, [0,H,W,C] -> # RGB [B,C,H,W]
             preds = yolact_net(batch, output_image=True)
 
@@ -451,8 +452,8 @@ def yolact_validation_wrapper(net, cam_idxs, input_imgs, gt_imgs, gt_segmaps):
 
 
 
-def init_yolact(model_weights_path, model_config="yolact_base_config"):
-    import config
+def init_yolact(model_weights_path, model_config="yolact_base_config", device=None):
+    from . import config
     
     global args
     args = config.Args()
@@ -476,7 +477,10 @@ def init_yolact(model_weights_path, model_config="yolact_base_config"):
                              neg_threshold=config.cfg.negative_iou_threshold,
                              negpos_ratio=config.cfg.ohem_negpos_ratio)
     
-    if args.cuda:
+    if device != None:
+        net = net.to(device)
+        criterion = criterion.to(device)
+    elif args.cuda:
         net = net.cuda()
         criterion = criterion.cuda()
     
@@ -504,7 +508,8 @@ def main():
     ####################################################################################################
     
     yolact_model = init_yolact(model_weights_path="/work/u5832291/yixian/YOLACT_edit/weights/yolact_base_54_800000.pth",
-                               model_config="yolact_base_config")
+                               model_config="yolact_base_config",
+                               device=torch.device("cuda:0"))    # To Alex: specify the device here i.e. torch.device(..), everything below will be moved to this device too
     
     input_size = (416, 416)
 
@@ -547,6 +552,9 @@ def main():
 
     concatenated_im_data = torch.cat([im_data0, im_data1, im_data2], dim=0)      # RGB [0-1], 3CHW
     concatenated_gt_segmap_data = torch.cat([segmap0, segmap1, segmap2], dim=0)  # RGB [0-1], 3CHW
+    
+    concatenated_im_data = concatenated_im_data.to(yolact_model[0].parameters().__next__().device)
+    concatenated_gt_segmap_data = concatenated_gt_segmap_data.to(yolact_model[0].parameters().__next__().device)
     
     # concatenated_gt_segmap_data should be the same as batch["binary_image_mask"] in coach.py
     
